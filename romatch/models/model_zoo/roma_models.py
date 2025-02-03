@@ -15,7 +15,7 @@ def tiny_roma_v1_model(weights = None, freeze_xfeat=False, exact_softmax=False, 
         model.load_state_dict(weights)
     return model
 
-def roma_model(resolution, upsample_preds, device = None, weights=None, dinov2_weights=None, amp_dtype: torch.dtype=torch.float16, **kwargs):
+def roma_model(resolution, upsample_preds, symmetric, sample_mode, device = None, weights=None, dinov2_weights=None, amp_dtype: torch.dtype=torch.float16, **kwargs):
     # romatch weights and dinov2 weights are loaded seperately, as dinov2 weights are not parameters
     #torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul TODO: these probably ruin stuff, should be careful
     #torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
@@ -161,10 +161,8 @@ def roma_model(resolution, upsample_preds, device = None, weights=None, dinov2_w
         amp_dtype=amp_dtype,
     )
     h,w = resolution
-    symmetric = True
     attenuate_cert = True
-    sample_mode = "threshold_balanced"
-    matcher = RegressionMatcher(encoder, decoder, h=h, w=w, upsample_preds=upsample_preds, 
+    matcher = RegressionMatcher(encoder, decoder, h=h, w=w, upsample_preds=upsample_preds,
                                 symmetric = symmetric, attenuate_cert = attenuate_cert, sample_mode = sample_mode, **kwargs).to(device)
     matcher.load_state_dict(weights)
     return matcher

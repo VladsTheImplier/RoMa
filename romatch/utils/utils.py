@@ -166,11 +166,13 @@ def get_tuple_transform_ops(resize=None, normalize=True, unscale=False, clahe = 
     ops = []
     if resize:
         ops.append(TupleResize(resize))
+
     ops.append(TupleToTensorScaled())
     if normalize:
         ops.append(
             TupleNormalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         )  # Imagenet mean/std
+
     return TupleCompose(ops)
 
 class ToTensorScaled(object):
