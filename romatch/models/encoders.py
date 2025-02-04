@@ -109,8 +109,16 @@ class CNNandDinov2(nn.Module):
     
     def forward(self, x, upsample = False):
         B,C,H,W = x.shape
+        start = torch.cuda.Event(enable_timing=True)
+        vgg = torch.cuda.Event(enable_timing=True)
+        dino = torch.cuda.Event(enable_timing=True)
+
+        start.record()
+
         feature_pyramid = self.cnn(x)
-        
+
+        vgg.record()
+
         if not upsample:
             with torch.no_grad():
                 if self.dinov2_vitl14[0].device != x.device:
@@ -119,4 +127,9 @@ class CNNandDinov2(nn.Module):
                 features_16 = dinov2_features_16['x_norm_patchtokens'].permute(0,2,1).reshape(B,1024,H//14, W//14)
                 del dinov2_features_16
                 feature_pyramid[16] = features_16
+
+        dino.record()
+        torch.cuda.synchronize()
+        print(f"VGG: {start.elapsed_time(vgg):.4f}ms\t\tDINOv2: {vgg.elapsed_time(dino):.4f}ms")
+
         return feature_pyramid

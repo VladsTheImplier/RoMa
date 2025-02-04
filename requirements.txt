@@ -3,12 +3,12 @@ einops
 torchvision
 opencv-python
 kornia
-albumentations
-loguru
+#albumentations
+#loguru
 tqdm
 matplotlib
 h5py
-wandb
-timm
-poselib
+#wandb
+#timm
+#poselib
 #xformers # Optional, used for memefficient attention
