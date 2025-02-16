@@ -125,12 +125,9 @@ class CNNandDinov2(nn.Module):
         vgg.record()
 
         if not upsample:
-            with torch.no_grad():
-                if self.dinov2_vitl14[0].device != x.device:
-                    self.dinov2_vitl14[0] = self.dinov2_vitl14[0].to(x.device).to(self.amp_dtype)
-                dinov2_features_16 = self.dinov2_vitl14[0].forward_features(x.to(self.amp_dtype))
-                features_16 = dinov2_features_16['x_norm_patchtokens'].permute(0,2,1).reshape(B,1024,H//14, W//14)
-                del dinov2_features_16
+            with torch.inference_mode(): # and torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
+                dinov2_features_16 = self.dinov2_vitl14(x.to(dtype=self.amp_dtype))  # TODO: Dino is faster without autocast
+                features_16 = dinov2_features_16.permute(0, 2, 1).reshape(B, 1024, H // 14, W // 14)
                 feature_pyramid[16] = features_16
 
         dino.record()

@@ -170,4 +170,5 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, device=None, 
                                 symmetric=symmetric, attenuate_cert=attenuate_cert,
                                 sample_mode=sample_mode, **kwargs).to(device)
     matcher.load_state_dict(weights)
+    matcher.show_dino()
     return matcher

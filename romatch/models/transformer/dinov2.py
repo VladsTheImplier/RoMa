@@ -93,6 +93,9 @@ class DinoVisionTransformer(nn.Module):
         self.num_heads = num_heads
         self.patch_size = patch_size
 
+        self.interpolate_offset = 0  # change to 0.1 for original behavior, but cannot be traced by torch.jit
+        self.interpolate_antialias = False
+
         self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
@@ -175,17 +178,25 @@ class DinoVisionTransformer(nn.Module):
         dim = x.shape[-1]
         w0 = w // self.patch_size
         h0 = h // self.patch_size
-        # we add a small number to avoid floating point error in the interpolation
-        # see discussion at https://github.com/facebookresearch/dino/issues/8
-        w0, h0 = w0 + 0.1, h0 + 0.1
-
+        M = int(math.sqrt(N))  # Recover the number of patches in each dimension
+        assert N == M * M
+        kwargs = {}
+        if self.interpolate_offset:
+            # Historical kludge: add a small number to avoid floating point error in the interpolation, see https://github.com/facebookresearch/dino/issues/8
+            # Note: still needed for backward-compatibility, the underlying operators are using both output size and scale factors
+            sx = float(w0 + self.interpolate_offset) / M
+            sy = float(h0 + self.interpolate_offset) / M
+            kwargs["scale_factor"] = (sx, sy)
+        else:
+            # Simply specify an output size instead of a scale factor
+            kwargs["size"] = (w0, h0)
         patch_pos_embed = nn.functional.interpolate(
-            patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
-            scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
+            patch_pos_embed.reshape(1, M, M, dim).permute(0, 3, 1, 2),
             mode="bicubic",
+            antialias=self.interpolate_antialias,
+            **kwargs,
         )
-
-        assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
+        assert (w0, h0) == patch_pos_embed.shape[-2:]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1).to(previous_dtype)
 
@@ -235,6 +246,9 @@ class DinoVisionTransformer(nn.Module):
             "x_prenorm": x,
             "masks": masks,
         }
+
+    def forward(self, x, masks=None):
+        return self.forward_features(x, masks)["x_norm_patchtokens"]
 
     def _get_intermediate_layers_not_chunked(self, x, n=1):
         x = self.prepare_tokens_with_masks(x)
@@ -288,12 +302,12 @@ class DinoVisionTransformer(nn.Module):
             return tuple(zip(outputs, class_tokens))
         return tuple(outputs)
 
-    def forward(self, *args, is_training=False, **kwargs):
-        ret = self.forward_features(*args, **kwargs)
-        if is_training:
-            return ret
-        else:
-            return self.head(ret["x_norm_clstoken"])
+    # def forward(self, *args, is_training=False, **kwargs):
+    #     ret = self.forward_features(*args, **kwargs)
+    #     if is_training:
+    #         return ret
+    #     else:
+    #         return self.head(ret["x_norm_clstoken"])
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = ""):
