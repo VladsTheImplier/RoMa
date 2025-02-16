@@ -51,6 +51,9 @@ if __name__ == "__main__":
     max_iter = 1e20
 
     save_results = False
+    compare_results = True
+    store = True
+
     original_kwargs = {"device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                        "coarse_res": (560, 560),
                        "upsample_res": (864, 864),
@@ -107,12 +110,21 @@ if __name__ == "__main__":
         times['im_read'].append(end_time - start_time)
 
         # match
-        start_time = time.perf_counter()
-        warp, certainty = roma_model.match(img_A, img_B,
-                                           img_A_ups, img_B_ups,
-                                           device=run_kwargs['device'])
-        end_time = time.perf_counter()
-        times['match'].append(end_time - start_time)
+        if store:
+            roma_model.extract_single_image(img_A, store=True)
+            start.record()
+            warp, certainty = roma_model.match(img_B,
+                                               use_stored=True,
+                                               device=run_kwargs['device'])
+
+        else:
+            start.record()
+            warp, certainty = roma_model.match(img_A, img_B,
+                                               img_A_ups, img_B_ups,
+                                               device=run_kwargs['device'])
+        end.record()
+        torch.cuda.synchronize()
+        times['match'].append(start.elapsed_time(end) / 1000)
 
         # sample
         start_time = time.perf_counter()

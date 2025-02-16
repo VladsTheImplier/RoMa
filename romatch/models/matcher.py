@@ -474,14 +474,22 @@ class RegressionMatcher(nn.Module):
         else:
             return self.upsample_res
 
-    def extract_backbone_features(self, batch, batched=True, upsample=False):
+    def extract_single_image(self, x: torch.Tensor, store: bool = True) -> torch.Tensor:
+        features = self.encoder(x, upsample=False)
+        self.stored_pyramid = features
+        return features
+
+    def extract_backbone_features(self, batch, batched=True, upsample=False, use_stored=False):
         x_q = batch["im_A"]
         x_s = batch["im_B"]
-        if batched:
-            X = torch.cat((x_q, x_s), dim=0)
-            feature_pyramid = self.encoder(X, upsample=upsample)
+        if use_stored:
+            feature_pyramid = self.encoder(x_q, upsample=upsample)
         else:
-            feature_pyramid = self.encoder(x_q, upsample=upsample), self.encoder(x_s, upsample=upsample)
+            if batched:
+                X = torch.cat((x_q, x_s), dim=0)
+                feature_pyramid = self.encoder(X, upsample=upsample)
+            else:
+                feature_pyramid = self.encoder(x_q, upsample=upsample), self.encoder(x_s, upsample=upsample)
         return feature_pyramid
 
     def sample(
@@ -516,13 +524,25 @@ class RegressionMatcher(nn.Module):
                                              replacement=False)
         return good_matches[balanced_samples], good_certainty[balanced_samples]
 
-    def forward(self, batch, batched=True, upsample=False, scale_factor: int | float = 1.):
-        feature_pyramid = self.extract_backbone_features(batch, batched=batched, upsample=upsample)
-        if batched:
-            f_q_pyramid = {scale: f_scale.chunk(2)[0] for scale, f_scale in feature_pyramid.items()}
-            f_s_pyramid = {scale: f_scale.chunk(2)[1] for scale, f_scale in feature_pyramid.items()}
+    def forward(self, batch,
+                batched=True,
+                upsample=False,
+                scale_factor: int | float = 1.,
+                use_stored=False):
+
+        feature_pyramid = self.extract_backbone_features(batch,
+                                                         batched=batched,
+                                                         upsample=upsample,
+                                                         use_stored=use_stored)  # VGG + DINO
+        if use_stored:
+            f_q_pyramid = self.stored_pyramid
+            f_s_pyramid = feature_pyramid
         else:
-            f_q_pyramid, f_s_pyramid = feature_pyramid
+            if batched:
+                f_q_pyramid = {scale: f_scale.chunk(2)[0] for scale, f_scale in feature_pyramid.items()}
+                f_s_pyramid = {scale: f_scale.chunk(2)[1] for scale, f_scale in feature_pyramid.items()}
+            else:
+                f_q_pyramid, f_s_pyramid = feature_pyramid
 
         corresps = self.decoder(f_q_pyramid,
                                 f_s_pyramid,
@@ -532,13 +552,24 @@ class RegressionMatcher(nn.Module):
 
         return corresps
 
-    def forward_symmetric(self, batch, batched=True, upsample=False, scale_factor: int | float = 1.):
-        feature_pyramid = self.extract_backbone_features(batch, batched=batched, upsample=upsample)
-        f_q_pyramid = feature_pyramid
-        f_s_pyramid = {
-            scale: torch.cat((f_scale.chunk(2)[1], f_scale.chunk(2)[0]), dim=0)
-            for scale, f_scale in feature_pyramid.items()
-        }
+    def forward_symmetric(self, batch, batched=True, upsample=False, scale_factor: int | float = 1., use_stored=False):
+        feature_pyramid = self.extract_backbone_features(batch,
+                                                         batched=batched,
+                                                         upsample=upsample,
+                                                         use_stored=use_stored)  # VGG + DINO        f_q_pyramid = feature_pyramid
+
+        if use_stored:
+            f_q_pyramid = {scale: torch.cat((self.stored_pyramid[scale],
+                                             feature_pyramid[scale]), dim=0) for scale in feature_pyramid}
+            f_s_pyramid = {scale: torch.cat((feature_pyramid[scale],
+                                             self.stored_pyramid[scale]), dim=0) for scale in feature_pyramid}
+
+        else:
+            f_q_pyramid = feature_pyramid
+            f_s_pyramid = {
+                scale: torch.cat((f_scale.chunk(2)[1], f_scale.chunk(2)[0]), dim=0)
+                for scale, f_scale in feature_pyramid.items()
+            }
         corresps = self.decoder(f_q_pyramid,
                                 f_s_pyramid,
                                 upsample=upsample,
@@ -617,12 +648,12 @@ class RegressionMatcher(nn.Module):
     def match(
             self,
             im_A,
-            im_B,
-            im_A_upsample,
-            im_B_upsample,
-            *args,
+            im_B=None,
+            im_A_upsample=None,
+            im_B_upsample=None,
+            use_stored=False,
             batched=False,
-            device=None,
+            device='cuda',
     ):
 
         start = torch.cuda.Event(enable_timing=True)
@@ -630,8 +661,9 @@ class RegressionMatcher(nn.Module):
 
         start.record()
 
+        hs, ws = self.h_resized, self.w_resized
         symmetric = self.symmetric
-        self.train(False)
+
         with torch.no_grad():
             if not batched:
                 batch = {"im_A": im_A, "im_B": im_B}
@@ -640,9 +672,9 @@ class RegressionMatcher(nn.Module):
 
             # Run matcher
             if symmetric:
-                corresps = self.forward_symmetric(batch)
+                corresps = self.forward_symmetric(batch, use_stored=use_stored)
             else:
-                corresps = self.forward(batch)
+                corresps = self.forward(batch, use_stored=use_stored)
 
             if self.upsample_preds:
                 hs, ws = self.upsample_res
@@ -654,11 +686,10 @@ class RegressionMatcher(nn.Module):
                     factor = 0.5
                     low_res_certainty = factor * low_res_certainty * (low_res_certainty < cert_clamp)
 
-            if self.upsample_preds:
                 finest_corresps = corresps[finest_scale]
-                torch.cuda.empty_cache()
 
-                scale_factor = math.sqrt(self.upsample_res[0] * self.upsample_res[1] / (self.w_resized * self.h_resized))
+                scale_factor = math.sqrt(
+                    self.upsample_res[0] * self.upsample_res[1] / (self.w_resized * self.h_resized))
                 batch = {"im_A": im_A_upsample, "im_B": im_B_upsample, "corresps": finest_corresps}
 
                 if symmetric:
@@ -667,7 +698,8 @@ class RegressionMatcher(nn.Module):
                     corresps = self.forward(batch, batched=True, upsample=True, scale_factor=scale_factor)
 
             im_A_to_im_B = corresps[finest_scale]["flow"]
-            certainty = corresps[finest_scale]["certainty"] - (low_res_certainty if self.attenuate_cert else 0)
+            certainty = corresps[finest_scale]["certainty"] - (low_res_certainty if (self.attenuate_cert and
+                                                                                     self.upsample_preds) else 0)
 
             if finest_scale != 1:
                 im_A_to_im_B = F.interpolate(im_A_to_im_B, size=(hs, ws), align_corners=False, mode="bilinear")
