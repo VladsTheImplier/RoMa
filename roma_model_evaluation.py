@@ -157,10 +157,11 @@ if __name__ == "__main__":
         F, mask = cv2.findFundamentalMat(
             kptsA_array,
             kptsB_array,
-            ransacReprojThreshold=0.2,
+            ransacReprojThreshold=1.,
             method=cv2.USAC_MAGSAC,
-            confidence=0.999999,
-            maxIters=10000)
+            confidence=0.99,
+            maxIters=1000)
+
         end_time = time.perf_counter()
         end_end_time = time.perf_counter()
         times['fundamental'].append(end_time - start_time)
