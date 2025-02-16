@@ -83,7 +83,16 @@ if __name__ == "__main__":
              "fundamental": [],
              "total": []}
 
-    for i in range(0, min(len(image_files) - 1, max_iter), 2):
+    results = {"img_a": [],
+               "img_b": [],
+               "run_kwargs": [],
+               "distances_sampson": [],
+               "certainty_top_16": []}
+
+    print(run_kwargs)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    for i in range(0, min(len(image_files), int(max_iter)), 2):
 
         imA_path = image_files[i]
         imB_path = image_files[i + 1]
@@ -157,19 +166,17 @@ if __name__ == "__main__":
         times['fundamental'].append(end_time - start_time)
         times['total'].append(end_end_time - start_start_time)
 
-        if save_results:
-            inliers_mask = mask.ravel().astype(bool)
-            # Filter inliers
-            kptsA = kptsA_array[inliers_mask][0:16]
-            kptsB = kptsB_array[inliers_mask][0:16]
+        # Filter inliers
+        inliers_mask = mask.ravel().astype(bool)
+        kptsA = kptsA_array[inliers_mask][0:16]
+        kptsB = kptsB_array[inliers_mask][0:16]
+        certainty = certainty[inliers_mask][0:16]
 
+        if save_results:
             keypointsA_filename = f"{output_dir}/{imA_name}.txt"
             keypointsB_filename = f"{output_dir}/{imB_name}.txt"
-
             np.savetxt(keypointsA_filename, kptsA, fmt='%.6f', delimiter=',', header="x,y")
             np.savetxt(keypointsB_filename, kptsB, fmt='%.6f', delimiter=',', header="x,y")
-
-            certainty = certainty[inliers_mask][0:16]
 
             output_name = f"{output_dir}/{i}_{imA_name}_{imB_name}.png"
             colors = generate_distinct_colors(len(kptsA))
@@ -187,6 +194,37 @@ if __name__ == "__main__":
                                  dpi=75,
                                  path=output_name)
 
+        if compare_results:
+            # Load tagged points
+            txtA_path = os.path.join(compare_dir, f"{imA_name}.txt")
+            txtB_path = os.path.join(compare_dir, f"{imB_name}.txt")
+
+            tagged_points_A = load_tagged_points(txtA_path)
+            tagged_points_B = load_tagged_points(txtB_path)
+
+            distances = calc_sampson_dist(tagged_points_A, tagged_points_B, F)
+
+            results['img_a'].append(imA_name)
+            results['img_b'].append(imB_name)
+            results['run_kwargs'].append({k: v for k, v in run_kwargs.items() if k != 'device'} if i == 0 else None)
+            results['distances_sampson'].append(distances)
+            results['certainty_top_16'].append(certainty.cpu().numpy())
+
+            if save_results:
+                # Compute epipolar lines for tagged points
+                epilines_B = cv2.computeCorrespondEpilines(tagged_points_A.reshape(-1, 1, 2),
+                                                           1, F).reshape(-1, 3)  # (1) maps points from the first image to lines in the second image.
+                epilines_A = cv2.computeCorrespondEpilines(tagged_points_B.reshape(-1, 1, 2),
+                                                           2, F).reshape(-1, 3)  # (2) maps points from the second image to lines in the first image
+                imA = cv2.imread(imA_path)
+                imB = cv2.imread(imB_path)
+
+                # Draw concatenated image with points and epipolar lines
+                draw_points_and_lines_concat(imA, imB, tagged_points_A, tagged_points_B, epilines_B, epilines_A,
+                                             output_path=f"{output_dir}/{imA_name}_{imB_name}_PredLine2GTPoint.jpg")
+
+
+
         # Output the results
         print(f"Processed pair: {imA_path}, {imB_path}")
         # print(f"Fundamental matrix F:\n{F}")
@@ -202,6 +240,11 @@ if __name__ == "__main__":
 
     times_df = pd.DataFrame(times)
     times_df.to_csv(f"{output_dir}/times.csv", index=False)
+
+    if compare_results:
+        results_df = pd.DataFrame(results)
+        results_df.to_hdf(f"{output_dir}/results.hf5", key='df', index=False)
+
     print("========================================================")
     print(f"\tAVERAGE TIMES for {run_kwargs}")
     print(f"im_read: {np.mean(times['im_read']):.4f} +- {np.std(times['im_read']):.4f} seconds")
