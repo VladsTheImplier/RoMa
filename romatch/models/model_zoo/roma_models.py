@@ -6,96 +6,99 @@ from romatch.models.transformer import Block, TransformerDecoder, MemEffAttentio
 from romatch.models.encoders import *
 from romatch.models.tiny import TinyRoMa
 
-def tiny_roma_v1_model(weights = None, freeze_xfeat=False, exact_softmax=False, xfeat = None):
+
+def tiny_roma_v1_model(weights=None, freeze_xfeat=False, exact_softmax=False, xfeat=None):
     model = TinyRoMa(
-        xfeat = xfeat,
-        freeze_xfeat=freeze_xfeat, 
+        xfeat=xfeat,
+        freeze_xfeat=freeze_xfeat,
         exact_softmax=exact_softmax)
     if weights is not None:
         model.load_state_dict(weights)
     return model
 
-def roma_model(resolution, upsample_preds, symmetric, sample_mode, device = None, weights=None, dinov2_weights=None, amp_dtype: torch.dtype=torch.float16, **kwargs):
+
+def roma_model(resolution, upsample_preds, symmetric, sample_mode, device=None, weights=None, dinov2_weights=None,
+               attenuate_cert=True, amp: bool = True, amp_dtype: torch.dtype = torch.float16, **kwargs):
     # romatch weights and dinov2 weights are loaded seperately, as dinov2 weights are not parameters
-    #torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul TODO: these probably ruin stuff, should be careful
-    #torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+    # torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul TODO: these probably ruin stuff, should be careful
+    # torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
     warnings.filterwarnings('ignore', category=UserWarning, message='TypedStorage is deprecated')
     gp_dim = 512
     feat_dim = 512
     decoder_dim = gp_dim + feat_dim
     cls_to_coord_res = 64
     coordinate_decoder = TransformerDecoder(
-        nn.Sequential(*[Block(decoder_dim, 8, attn_class=MemEffAttention) for _ in range(5)]), 
-        decoder_dim, 
-        cls_to_coord_res**2 + 1,
+        nn.Sequential(*[Block(decoder_dim, 8, attn_class=MemEffAttention) for _ in range(5)]),
+        decoder_dim,
+        cls_to_coord_res ** 2 + 1,
         is_classifier=True,
-        amp = True,
-        pos_enc = False,)
+        amp=amp,
+        pos_enc=False, )
     dw = True
     hidden_blocks = 8
     kernel_size = 5
     displacement_emb = "linear"
     disable_local_corr_grad = True
-    
+
     conv_refiner = nn.ModuleDict(
         {
             "16": ConvRefiner(
-                2 * 512+128+(2*7+1)**2,
-                2 * 512+128+(2*7+1)**2,
+                2 * 512 + 128 + (2 * 7 + 1) ** 2,
+                2 * 512 + 128 + (2 * 7 + 1) ** 2,
                 2 + 1,
                 kernel_size=kernel_size,
                 dw=dw,
                 hidden_blocks=hidden_blocks,
                 displacement_emb=displacement_emb,
                 displacement_emb_dim=128,
-                local_corr_radius = 7,
-                corr_in_other = True,
-                amp = True,
-                disable_local_corr_grad = disable_local_corr_grad,
-                bn_momentum = 0.01,
+                local_corr_radius=7,
+                corr_in_other=True,
+                amp=amp,
+                disable_local_corr_grad=disable_local_corr_grad,
+                bn_momentum=0.01,
             ),
             "8": ConvRefiner(
-                2 * 512+64+(2*3+1)**2,
-                2 * 512+64+(2*3+1)**2,
+                2 * 512 + 64 + (2 * 3 + 1) ** 2,
+                2 * 512 + 64 + (2 * 3 + 1) ** 2,
                 2 + 1,
                 kernel_size=kernel_size,
                 dw=dw,
                 hidden_blocks=hidden_blocks,
                 displacement_emb=displacement_emb,
                 displacement_emb_dim=64,
-                local_corr_radius = 3,
-                corr_in_other = True,
-                amp = True,
-                disable_local_corr_grad = disable_local_corr_grad,
-                bn_momentum = 0.01,
+                local_corr_radius=3,
+                corr_in_other=True,
+                amp=amp,
+                disable_local_corr_grad=disable_local_corr_grad,
+                bn_momentum=0.01,
             ),
             "4": ConvRefiner(
-                2 * 256+32+(2*2+1)**2,
-                2 * 256+32+(2*2+1)**2,
+                2 * 256 + 32 + (2 * 2 + 1) ** 2,
+                2 * 256 + 32 + (2 * 2 + 1) ** 2,
                 2 + 1,
                 kernel_size=kernel_size,
                 dw=dw,
                 hidden_blocks=hidden_blocks,
                 displacement_emb=displacement_emb,
                 displacement_emb_dim=32,
-                local_corr_radius = 2,
-                corr_in_other = True,
-                amp = True,
-                disable_local_corr_grad = disable_local_corr_grad,
-                bn_momentum = 0.01,
+                local_corr_radius=2,
+                corr_in_other=True,
+                amp=amp,
+                disable_local_corr_grad=disable_local_corr_grad,
+                bn_momentum=0.01,
             ),
             "2": ConvRefiner(
-                2 * 64+16,
-                128+16,
+                2 * 64 + 16,
+                128 + 16,
                 2 + 1,
                 kernel_size=kernel_size,
                 dw=dw,
                 hidden_blocks=hidden_blocks,
                 displacement_emb=displacement_emb,
                 displacement_emb_dim=16,
-                amp = True,
-                disable_local_corr_grad = disable_local_corr_grad,
-                bn_momentum = 0.01,
+                amp=amp,
+                disable_local_corr_grad=disable_local_corr_grad,
+                bn_momentum=0.01,
             ),
             "1": ConvRefiner(
                 2 * 9 + 6,
@@ -103,12 +106,12 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, device = None
                 2 + 1,
                 kernel_size=kernel_size,
                 dw=dw,
-                hidden_blocks = hidden_blocks,
-                displacement_emb = displacement_emb,
-                displacement_emb_dim = 6,
-                amp = True,
-                disable_local_corr_grad = disable_local_corr_grad,
-                bn_momentum = 0.01,
+                hidden_blocks=hidden_blocks,
+                displacement_emb=displacement_emb,
+                displacement_emb_dim=6,
+                amp=amp,
+                disable_local_corr_grad=disable_local_corr_grad,
+                bn_momentum=0.01,
             ),
         }
     )
@@ -139,30 +142,32 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, device = None
         "4": proj4,
         "2": proj2,
         "1": proj1,
-        })
+    })
     displacement_dropout_p = 0.0
     gm_warp_dropout_p = 0.0
-    decoder = Decoder(coordinate_decoder, 
-                      gps, 
-                      proj, 
-                      conv_refiner, 
-                      detach=True, 
-                      scales=["16", "8", "4", "2", "1"], 
-                      displacement_dropout_p = displacement_dropout_p,
-                      gm_warp_dropout_p = gm_warp_dropout_p)
-    
+    decoder = Decoder(coordinate_decoder,
+                      gps,
+                      proj,
+                      conv_refiner,
+                      detach=True,
+                      amp=amp,
+                      scales=["16", "8", "4", "2", "1"],
+                      displacement_dropout_p=displacement_dropout_p,
+                      gm_warp_dropout_p=gm_warp_dropout_p)
+
     encoder = CNNandDinov2(
-        cnn_kwargs = dict(
-            pretrained=False,
-            amp = True),
-        amp = True,
-        use_vgg = True,
-        dinov2_weights = dinov2_weights,
+        cnn_kwargs=dict(
+            pretrained=False,  # TODO: dubious. why? performance is similar with 'True'
+            amp=amp),
+        amp=amp,
+        device=device,
+        use_vgg=True,
+        dinov2_weights=dinov2_weights,
         amp_dtype=amp_dtype,
     )
-    h,w = resolution
-    attenuate_cert = True
+    h, w = resolution
     matcher = RegressionMatcher(encoder, decoder, h=h, w=w, upsample_preds=upsample_preds,
-                                symmetric = symmetric, attenuate_cert = attenuate_cert, sample_mode = sample_mode, **kwargs).to(device)
+                                symmetric=symmetric, attenuate_cert=attenuate_cert,
+                                sample_mode=sample_mode, **kwargs).to(device)
     matcher.load_state_dict(weights)
     return matcher

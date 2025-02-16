@@ -1,4 +1,7 @@
 import bisect
+import os
+
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
@@ -86,3 +89,89 @@ def prepare_image_for_roma(img_path: str, *, mean: list, std: list,
     t_big_img = t_big_img.sub_(mean).div_(std).unsqueeze(0)
 
     return t_small_img, t_big_img, (w, h)
+
+
+def load_tagged_points(txt_path: str) -> np.ndarray:
+    """Load tagged points from a .txt file."""
+    if os.path.exists(txt_path):
+        points = np.loadtxt(txt_path, delimiter=",")
+        if points.ndim == 1:  # Handle single point case
+            points = points[np.newaxis, :]
+        return points
+
+    return np.array([])
+
+
+def to_homogenous(a: np.ndarray) -> np.ndarray:
+    """ Transform given vector of coordinates to homogeneous coordinates by adding a 1 at the end.
+        e.g: [x, y] --> [x, y, 1] """
+    return np.concatenate((a.reshape(-1, 1), np.ones((1, 1))))
+
+
+def calc_sampson_dist(points_a: np.ndarray, points_b: np.ndarray, F: np.ndarray) -> np.ndarray:
+    results = []
+    for a, b in zip(points_a, points_b):
+        dist = cv2.sampsonDistance(to_homogenous(a), to_homogenous(b), F)
+        results.append(dist)
+
+    return np.array(results)
+
+
+def draw_points_and_lines_concat(imA, imB, points_A_tagged, points_B_tagged, epilines_B, epilines_A, output_path):
+    """Concatenate two images and draw points and epipolar lines."""
+    # Concatenate images horizontally
+    hA, wA, _ = imA.shape
+    hB, wB, _ = imB.shape
+    height = max(hA, hB)
+    width = wA + wB
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+
+    canvas[:hA, :wA, :] = imA
+    canvas[:hB, wA:wA + wB, :] = imB
+
+    # Dynamically set thickness and point size based on image size
+    avg_dim = (wA + hA + wB + hB) / 4
+    point_radius = max(5, int(avg_dim * 0.005))  # Minimum radius of 5
+    line_thickness = max(2, int(avg_dim * 0.002))  # Minimum thickness of 2
+
+    # Draw points and epipolar lines
+    for idx, (pointA_tagged, epiB, pointB_tagged, epiA) in enumerate(
+            zip(points_A_tagged, epilines_B, points_B_tagged, epilines_A)):
+        color = tuple(np.random.randint(0, 255, 3).tolist())
+
+        # Point in imA
+        xA_tagged, yA_tagged = map(int, pointA_tagged)
+        cv2.circle(canvas, (xA_tagged, yA_tagged), point_radius, color, -1)
+        cv2.putText(canvas, f"A{idx}", (xA_tagged + 5, yA_tagged - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Point in imB
+        xB_tagged, yB_tagged = map(int, pointB_tagged)
+        cv2.circle(canvas, (xB_tagged + wA, yB_tagged), point_radius, color, -1)
+        cv2.putText(canvas, f"B{idx}", (xB_tagged + wA + 5, yB_tagged - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Epipolar line in imB
+        aB, bB, cB = epiB
+        # Calculate the endpoints for the epipolar line in imB
+        if bB != 0:
+            x0B, y0B = 0, int(-cB / bB)  # Line at x=0 (Left Edge of the Image)
+            x1B, y1B = wB, int(-(aB * wB + cB) / bB)  # Line at x=wB (Right Edge of the Image)
+        else:  # Special case when bB == 0 (horizontal line)
+            x0B, y0B = int(-cB / aB), 0
+            x1B, y1B = int(-cB / aB), height
+        # Draw the epipolar line in imB (adjusting x-coordinates to account for canvas layout)
+        cv2.line(canvas, (x0B + wA, y0B), (x1B + wA, y1B), color, line_thickness)
+
+        # Epipolar line in imA
+        aA, bA, cA = epiA
+        # Calculate the endpoints for the epipolar line in imA
+        if bA != 0:
+            x0A, y0A = 0, int(-cA / bA)  # Line at x=0
+            x1A, y1A = wA, int(-(aA * wA + cA) / bA)  # Line at x=wA
+        else:  # Special case when bA == 0 (horizontal line)
+            x0A, y0A = int(-cA / aA), 0
+            x1A, y1A = int(-cA / aA), height
+        # Draw the epipolar line in imA
+        cv2.line(canvas, (x0A, y0A), (x1A, y1A), color, line_thickness)
+
+    # Save the result
+    cv2.imwrite(output_path, canvas)

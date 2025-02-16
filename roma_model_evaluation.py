@@ -36,53 +36,40 @@ if __name__ == "__main__":
     # path_ = "/vlad/couples_vis_vis"
     # output_dir = path_ + "_Results"  # "/app/code/yifat/data/Results_Finder/Results_roma_inliers_24_11_renamed_560"
 
-    path_ = "/home/vladislavs/finder-data/data/images/26_12_renamed/images"
-    output_dir = "26_12_renamed_Results"
+    # ds_path = "/mnt/utah-server-new/Finder/data/images/26_12_renamed"
+    ds_path = "/home/vladislavs/finder-data/data/images/26_12_renamed_subset"
 
-    # a = torch.rand((3000, 3000), device="cuda")
-    # mesh_times = []
-    # b = a@a
-    # for _ in range(10):
-    #     start = torch.cuda.Event(enable_timing=True)
-    #     end = torch.cuda.Event(enable_timing=True)
-    #
-    #     start.record()
-    #     im_A_coords = torch.meshgrid((torch.linspace(-1 + 1 / 576, 1 - 1 / 576, 576, device='cuda'),
-    #                                   torch.linspace(-1 + 1 / 576, 1 - 1 / 576, 576, device='cuda')), indexing='ij')
-    #     end.record()
-    #     torch.cuda.synchronize()
-    #     mesh_times.append(start.elapsed_time(end))
-    #
-    # print(mesh_times)
-    # exit(0)
+    img_path = f"{ds_path}/images"
+    compare_dir = f"{ds_path}/tags_original"
+    output_dir = f"{ds_path}/tags_no_upsampling406_balanced-no-th_store_fransac_autocast-dino"
 
     os.makedirs(output_dir, exist_ok=True)
     setup_logging(f"{output_dir}/logs.log")
 
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]
-    max_iter = 300
+    max_iter = 1e20
 
     save_results = False
     original_kwargs = {"device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                        "coarse_res": (560, 560),
                        "upsample_res": (864, 864),
                        "symmetric": True,
-                       "sample_mode": 'threshold_balanced'}
+                       "sample_mode": 'threshold_balanced',
+                       "upsample_preds": True}
 
     run_kwargs = {"device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-                  "coarse_res": (350, 350),  # 560
-                  "upsample_res": (576, 576),  # 864
-                  "symmetric": False,  # True
-                  "sample_mode": 'threshold',  # threshold_balanced
-                  }
+                  "coarse_res": (406, 406),  # mul 14
+                  "upsample_res": (608, 608),  # mul 16
+                  "symmetric": False,
+                  "sample_mode": 'balanced',
+                  "upsample_preds": False}
 
     # run_kwargs = original_kwargs
-
     roma_model = roma_outdoor(**run_kwargs)
 
     image_files = sorted(
-        [os.path.join(path_, f) for f in os.listdir(path_) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+        [os.path.join(img_path, f) for f in os.listdir(img_path) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
     )
 
     times = {"im_read": [],

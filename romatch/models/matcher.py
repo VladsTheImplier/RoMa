@@ -108,17 +108,12 @@ class ConvRefiner(nn.Module):
 
     def forward(self, x, y, flow, scale_factor=1, logits=None):
         b, c, hs, ws = x.shape
-        autocast_device, autocast_enabled, autocast_dtype = get_autocast_params(x.device, enabled=self.amp,
-                                                                                dtype=self.amp_dtype)
-        with torch.autocast(autocast_device, enabled=autocast_enabled, dtype=autocast_dtype):
+        with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
             x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode=self.sample_mode)
             if self.has_displacement_emb:
-                im_A_coords = torch.meshgrid(
-                    (
-                        torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
-                        torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),
-                    ), indexing='ij'
-                )
+                im_A_coords = torch.meshgrid((torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
+                                              torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),),
+                                             indexing='ij')
                 im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
                 im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
                 in_displacement = flow - im_A_coords
@@ -284,8 +279,7 @@ class Decoder(nn.Module):
     def __init__(
             self, embedding_decoder, gps, proj, conv_refiner, detach=False, scales="all", pos_embeddings=None,
             num_refinement_steps_per_scale=1, warp_noise_std=0.0, displacement_dropout_p=0.0, gm_warp_dropout_p=0.0,
-            flow_upsample_mode="bilinear", amp_dtype=torch.float16,
-    ):
+            flow_upsample_mode="bilinear", amp: bool = True, amp_dtype=torch.float16):
         super().__init__()
         self.embedding_decoder = embedding_decoder
         self.num_refinement_steps_per_scale = num_refinement_steps_per_scale
@@ -307,6 +301,7 @@ class Decoder(nn.Module):
         self.gm_warp_dropout_p = gm_warp_dropout_p
         self.flow_upsample_mode = flow_upsample_mode
         self.amp_dtype = amp_dtype
+        self.amp = amp
 
     def get_placeholder_flow(self, b, h, w, device):
         coarse_coords = torch.meshgrid(
@@ -341,6 +336,10 @@ class Decoder(nn.Module):
     def forward(self, f1, f2, gt_warp=None, gt_prob=None, upsample=False, flow=None, certainty=None, scale_factor=1):
         gp_start = torch.cuda.Event(enable_timing=True)
         gp_end = torch.cuda.Event(enable_timing=True)
+        proj_start = torch.cuda.Event(enable_timing=True)
+        proj_end = torch.cuda.Event(enable_timing=True)
+        refine_start = torch.cuda.Event(enable_timing=True)
+        refine_end = torch.cuda.Event(enable_timing=True)
 
         coarse_scales = self.embedding_decoder.scales()
         all_scales = self.scales if not upsample else ["8", "4", "2", "1"]
@@ -369,23 +368,23 @@ class Decoder(nn.Module):
                 align_corners=False,
                 mode="bilinear",
             )
-        displacement = 0.0
+
         for new_scale in all_scales:
             ins = int(new_scale)
             corresps[ins] = {}
             f1_s, f2_s = f1[ins], f2[ins]
+
+            proj_start.record()
+
             if new_scale in self.proj:
-                autocast_device, autocast_enabled, autocast_dtype = get_autocast_params(f1_s.device,
-                                                                                        str(f1_s) == 'cuda',
-                                                                                        self.amp_dtype)
-                with torch.autocast(autocast_device, enabled=autocast_enabled, dtype=autocast_dtype):
-                    if not autocast_enabled:
-                        f1_s, f2_s = f1_s.to(torch.float32), f2_s.to(torch.float32)
+                with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
                     f1_s, f2_s = self.proj[new_scale](f1_s), self.proj[new_scale](f2_s)
+
+            proj_end.record()
+            gp_start.record()
 
             if ins in coarse_scales:
 
-                gp_start.record()
 
                 old_stuff = F.interpolate(
                     old_stuff, size=sizes[ins], mode="bilinear", align_corners=False
@@ -396,51 +395,44 @@ class Decoder(nn.Module):
                 )
 
                 if self.embedding_decoder.is_classifier:
-                    flow = cls_to_flow_refine(
-                        gm_warp_or_cls,
-                    ).permute(0, 3, 1, 2)
-                    corresps[ins].update(
-                        {"gm_cls": gm_warp_or_cls, "gm_certainty": certainty, }) if self.training else None
+                    flow = cls_to_flow_refine(gm_warp_or_cls).permute(0, 3, 1, 2)
+
                 else:
-                    corresps[ins].update(
-                        {"gm_flow": gm_warp_or_cls, "gm_certainty": certainty, }) if self.training else None
                     flow = gm_warp_or_cls.detach()
 
-                gp_end.record()
-                torch.cuda.synchronize()
-                print(f"GP: {gp_start.elapsed_time(gp_end):.4f}ms")
-
+            gp_end.record()
+            refine_start.record()
 
             if new_scale in self.conv_refiner:
-                corresps[ins].update({"flow_pre_delta": flow}) if self.training else None
-                delta_flow, delta_certainty = self.conv_refiner[new_scale](
-                    f1_s, f2_s, flow, scale_factor=scale_factor, logits=certainty,
-                )
-                corresps[ins].update({"delta_flow": delta_flow, }) if self.training else None
+                delta_flow, delta_certainty = self.conv_refiner[new_scale](f1_s, f2_s, flow,
+                                                                           scale_factor=scale_factor,
+                                                                           logits=certainty)
+
                 displacement = ins * torch.stack((delta_flow[:, 0].float() / (self.refine_init * w),
                                                   delta_flow[:, 1].float() / (self.refine_init * h),), dim=1, )
+
+                # predict both certainty and displacement
                 flow = flow + displacement
-                certainty = (
-                        certainty + delta_certainty
-                )  # predict both certainty and displacement
-            corresps[ins].update({
-                "certainty": certainty,
-                "flow": flow,
-            })
+                certainty = certainty + delta_certainty
+
+            corresps[ins].update({"certainty": certainty, "flow": flow})
+
             if new_scale != "1":
                 flow = F.interpolate(
                     flow,
                     size=sizes[ins // 2],
-                    mode=self.flow_upsample_mode,
-                )
+                    mode=self.flow_upsample_mode)
+
                 certainty = F.interpolate(
                     certainty,
                     size=sizes[ins // 2],
-                    mode=self.flow_upsample_mode,
-                )
-                if self.detach:
-                    flow = flow.detach()
-                    certainty = certainty.detach()
+                    mode=self.flow_upsample_mode)
+
+            refine_end.record()
+            # torch.cuda.synchronize()
+            # print(f"GP: {gp_start.elapsed_time(gp_end):.4f}ms")
+            # print(f"Proj{new_scale}: {proj_start.elapsed_time(proj_end):.4f}ms")
+            # print(f"Refine{new_scale}: {refine_start.elapsed_time(refine_end):.4f}ms")
             # torch.cuda.empty_cache()
         return corresps
 
@@ -471,6 +463,10 @@ class RegressionMatcher(nn.Module):
         self.upsample_res = (14 * 16 * 6, 14 * 16 * 6)
         self.symmetric = symmetric
         self.sample_thresh = 0.05
+        self.train(False)
+
+    def show_dino(self):
+        self.encoder.dinov2_vitl14 = self.encoder.dinov2_vitl14[0]
 
     def get_output_resolution(self):
         if not self.upsample_preds:
@@ -628,11 +624,7 @@ class RegressionMatcher(nn.Module):
             batched=False,
             device=None,
     ):
-        start = torch.cuda.Event(enable_timing=True)
-        start = torch.cuda.Event(enable_timing=True)
-        start = torch.cuda.Event(enable_timing=True)
-        start = torch.cuda.Event(enable_timing=True)
-        start = torch.cuda.Event(enable_timing=True)
+
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
 
@@ -655,12 +647,12 @@ class RegressionMatcher(nn.Module):
             if self.upsample_preds:
                 hs, ws = self.upsample_res
 
-            if self.attenuate_cert:
-                low_res_certainty = F.interpolate(corresps[16]["certainty"], size=(hs, ws),
-                                                  align_corners=False, mode="bilinear")
-                cert_clamp = 0
-                factor = 0.5
-                low_res_certainty = factor * low_res_certainty * (low_res_certainty < cert_clamp)
+                if self.attenuate_cert:
+                    low_res_certainty = F.interpolate(corresps[16]["certainty"], size=(hs, ws),
+                                                      align_corners=False, mode="bilinear")
+                    cert_clamp = 0
+                    factor = 0.5
+                    low_res_certainty = factor * low_res_certainty * (low_res_certainty < cert_clamp)
 
             if self.upsample_preds:
                 finest_corresps = corresps[finest_scale]
