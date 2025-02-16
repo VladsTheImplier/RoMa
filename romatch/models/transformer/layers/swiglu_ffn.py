@@ -9,6 +9,8 @@ from typing import Callable, Optional
 from torch import Tensor, nn
 import torch.nn.functional as F
 
+from constants import XFORMERS_AVAILABLE
+
 
 class SwiGLUFFN(nn.Module):
     def __init__(
@@ -33,13 +35,11 @@ class SwiGLUFFN(nn.Module):
         return self.w3(hidden)
 
 
-try:
+if XFORMERS_AVAILABLE:
     from xformers.ops import SwiGLU
 
-    XFORMERS_AVAILABLE = True
-except ImportError:
+else:
     SwiGLU = SwiGLUFFN
-    XFORMERS_AVAILABLE = False
 
 
 class SwiGLUFFNFused(SwiGLU):
