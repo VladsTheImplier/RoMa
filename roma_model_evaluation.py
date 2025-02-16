@@ -58,14 +58,14 @@ if __name__ == "__main__":
                        "coarse_res": (560, 560),
                        "upsample_res": (864, 864),
                        "symmetric": True,
-                       "sample_mode": 'threshold_balanced',
+                       "sample_mode": 'threshold_balanced_approx',
                        "upsample_preds": True}
 
     run_kwargs = {"device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                   "coarse_res": (406, 406),  # mul 14
                   "upsample_res": (608, 608),  # mul 16
                   "symmetric": False,
-                  "sample_mode": 'balanced',
+                  "sample_mode": 'balanced_approx',
                   "upsample_preds": False}
 
     # run_kwargs = original_kwargs
