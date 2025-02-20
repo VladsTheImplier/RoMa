@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 import matplotlib
 import torch
 from PIL import Image
+from einops import rearrange
+
+from romatch.utils.kde import kde
 
 
 def generate_distinct_colors(n):
@@ -179,3 +182,56 @@ def draw_points_and_lines_concat(imA, imB, points_A_tagged, points_B_tagged, epi
 
     # Save the result
     cv2.imwrite(output_path, canvas)
+
+
+@torch.jit.script
+def sample(matches: torch.Tensor,
+           certainty: torch.Tensor,
+           expansion_factor: float,
+           reduction_factor: float,
+           sample_mode: str,
+           sample_thresh: float = 0.05,
+           num: int = 10000) -> tuple[torch.Tensor, torch.Tensor]:
+    # TODO: turning this on seems to not change prediction performance much
+    if "threshold" in sample_mode:
+        certainty = certainty.clone()
+        certainty[certainty > sample_thresh] = 1
+
+    matches, certainty = (
+        matches.reshape(-1, 4),
+        certainty.reshape(-1),
+    )
+
+    good_samples = torch.multinomial(certainty,
+                                     num_samples=min(int(expansion_factor * num), len(certainty)),
+                                     replacement=False)
+    good_matches, good_certainty = matches[good_samples], certainty[good_samples]
+
+    # if "balanced" not in self.sample_mode:  # TODO: potential fast exit point. faster but worse performance
+    #     return good_matches, good_certainty
+
+    density = kde(good_matches, std=0.1, half='approx' in sample_mode)
+    p = 1 / (density + 1)
+    p[density < 10] = 1e-7  # Basically should have at least 10 perfect neighbours, or around 100 ok ones
+    balanced_samples = torch.multinomial(p,
+                                         num_samples=min(int(num / reduction_factor), len(good_certainty)),
+                                         replacement=False)
+    return good_matches[balanced_samples], good_certainty[balanced_samples]
+
+
+def get_pos_enc(self, y: torch.Tensor) -> torch.Tensor:
+    b, c, h, w = y.shape
+    coarse_coords = torch.meshgrid(
+        (
+            torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device=y.device),
+            torch.linspace(-1 + 1 / w, 1 - 1 / w, w, device=y.device),
+        ),
+        indexing='ij'
+    )
+
+    coarse_coords = torch.stack((coarse_coords[1], coarse_coords[0]), dim=-1)[
+        None
+    ].expand(b, h, w, 2)
+    coarse_coords = rearrange(coarse_coords, "b h w d -> b d h w")
+    coarse_embedded_coords = self.project_to_basis(coarse_coords)
+    return coarse_embedded_coords

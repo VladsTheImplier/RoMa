@@ -106,7 +106,7 @@ class ConvRefiner(nn.Module):
         conv2 = nn.Conv2d(out_dim, out_dim, 1, 1, 0)
         return nn.Sequential(conv1, norm, relu, conv2)
 
-    def forward(self, x, y, flow, scale_factor=1, logits=None):
+    def forward_old(self, x, y, flow, scale_factor=1, logits=None):
         b, c, hs, ws = x.shape
         with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
             x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode=self.sample_mode)
@@ -136,6 +136,62 @@ class ConvRefiner(nn.Module):
                 d = torch.cat((x, x_hat), dim=1)
             if self.concat_logits:  # TODO False always
                 d = torch.cat((d, logits), dim=1)
+            d = self.block1(d)
+            d = self.hidden_blocks(d)
+        d = self.out_conv(d.float())
+        displacement, certainty = d[:, :-1], d[:, -1:]
+        return displacement, certainty
+
+
+class ConvRefinerCoarse(ConvRefiner):
+    def __init__(self, *args, **kwargs):
+        """ To be used for 16, 8, 4 sizes"""
+        super().__init__(*args, **kwargs)
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor, flow: torch.Tensor, scale_factor):
+        b, c, hs, ws = x.shape
+        with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
+            x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode=self.sample_mode)
+            im_A_coords = torch.meshgrid((torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
+                                          torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),),
+                                         indexing='ij')
+            im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
+            im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
+            in_displacement = flow - im_A_coords
+            emb_in_displacement = self.disp_emb(40 / 32 * scale_factor * in_displacement)
+
+            # Corr in other means take a kxk grid around the predicted coordinate in other image
+            local_corr = local_correlation(x, y, local_radius=self.local_corr_radius, flow=flow,
+                                           sample_mode=self.sample_mode)
+
+            d = torch.cat((x, x_hat, emb_in_displacement, local_corr), dim=1)
+
+            d = self.block1(d)
+            d = self.hidden_blocks(d)
+        d = self.out_conv(d.float())
+        displacement, certainty = d[:, :-1], d[:, -1:]
+        return displacement, certainty
+
+
+class ConvRefinerFine(ConvRefiner):
+    """ To be used for 2, 1 sizes"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor, flow: torch.Tensor, scale_factor):
+        b, c, hs, ws = x.shape
+        with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
+            x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode=self.sample_mode)
+            im_A_coords = torch.meshgrid((torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
+                                          torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),),
+                                         indexing='ij')
+            im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
+            im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
+            in_displacement = flow - im_A_coords
+            emb_in_displacement = self.disp_emb(40 / 32 * scale_factor * in_displacement)
+
+            d = torch.cat((x, x_hat, emb_in_displacement), dim=1)
+
             d = self.block1(d)
             d = self.hidden_blocks(d)
         d = self.out_conv(d.float())
@@ -417,8 +473,7 @@ class Decoder(nn.Module):
 
             if new_scale in self.conv_refiner:
                 delta_flow, delta_certainty = self.conv_refiner[new_scale](f1_s, f2_s, flow,
-                                                                           scale_factor=scale_factor,
-                                                                           logits=certainty)
+                                                                           scale_factor=scale_factor)
 
                 displacement = ins * torch.stack((delta_flow[:, 0].float() / (self.refine_init * w),
                                                   delta_flow[:, 1].float() / (self.refine_init * h),), dim=1, )
@@ -511,7 +566,8 @@ class RegressionMatcher(nn.Module):
             matches,
             certainty,
             num=10000,
-    ):
+    ):  # TODO: UNUSED. there is a scripted version in utils
+
         # TODO: turning this on seems to not change prediction performance much
         # if "threshold" in self.sample_mode:
         #     upper_thresh = self.sample_thresh

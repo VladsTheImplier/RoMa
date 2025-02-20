@@ -308,16 +308,19 @@ def cls_to_flow(cls, deterministic_sampling=True):
     flow = G[sampled_cls]
     return flow
 
-@torch.no_grad()
+
+# @torch.inference_mode
+@torch.jit.script
 def cls_to_flow_refine(cls):
     B, C, H, W = cls.shape
     device = cls.device
-    res = round(math.sqrt(C))
+    res = int(round(C ** 0.5))
     G = torch.meshgrid(
-        *[torch.linspace(-1+1/res, 1-1/res, steps = res, device = device) for _ in range(2)],
-        indexing = 'ij'
-        )
-    G = torch.stack([G[1],G[0]],dim=-1).reshape(C,2)
+        torch.linspace(-torch.tensor(1 + 1 / res), torch.tensor(1 - 1 / res), steps=res, device=device),
+          torch.linspace(torch.tensor(-1 + 1 / res), torch.tensor(1 - 1 / res), steps=res, device=device),
+        indexing='ij')
+
+    G = torch.stack([G[1], G[0]], dim=-1).reshape(C, 2)
     # FIXME: below softmax line causes mps to bug, don't know why.
 
     if device.type == 'mps':

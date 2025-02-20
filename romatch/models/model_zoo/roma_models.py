@@ -47,7 +47,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
 
     conv_refiner = nn.ModuleDict(
         {
-            "16": ConvRefiner(
+            "16": ConvRefinerCoarse(
                 2 * 512 + 128 + (2 * 7 + 1) ** 2,
                 2 * 512 + 128 + (2 * 7 + 1) ** 2,
                 2 + 1,
@@ -62,7 +62,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
             ),
-            "8": ConvRefiner(
+            "8": ConvRefinerCoarse(
                 2 * 512 + 64 + (2 * 3 + 1) ** 2,
                 2 * 512 + 64 + (2 * 3 + 1) ** 2,
                 2 + 1,
@@ -77,7 +77,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
             ),
-            "4": ConvRefiner(
+            "4": ConvRefinerCoarse(
                 2 * 256 + 32 + (2 * 2 + 1) ** 2,
                 2 * 256 + 32 + (2 * 2 + 1) ** 2,
                 2 + 1,
@@ -92,7 +92,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
             ),
-            "2": ConvRefiner(
+            "2": ConvRefinerFine(
                 2 * 64 + 16,
                 128 + 16,
                 2 + 1,
@@ -105,7 +105,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
             ),
-            "1": ConvRefiner(
+            "1": ConvRefinerFine(
                 2 * 9 + 6,
                 24,
                 2 + 1,
@@ -120,6 +120,15 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
             ),
         }
     )
+    # FIXME: not faster, tracer also claims wrong results :(
+    # cr16 = torch.jit.trace(func=conv_refiner['16'].cuda(),
+    #                        example_inputs=(torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
+    #                                        torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
+    #                                        torch.rand((1, 2, 30, 30), device='cuda', dtype=torch.float32),
+    #                                        torch.tensor(1.0, device='cuda')))
+    #
+    # conv_refiner['16'] = cr16
+
     kernel_temperature = 0.2
     learn_temperature = False
     no_cov = True
@@ -135,7 +144,10 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
         basis=basis,
         no_cov=no_cov,
     )
-    gps = nn.ModuleDict({"16": gp16})
+
+    gp16 = torch.jit.trace(func=gp16.cuda(), example_inputs=(torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16),
+                                     torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16)))
+    gps = nn.ModuleDict({"16": torch.jit.script(gp16)})
     proj16 = nn.Sequential(nn.Conv2d(1024, 512, 1, 1), nn.BatchNorm2d(512))
     proj8 = nn.Sequential(nn.Conv2d(512, 512, 1, 1), nn.BatchNorm2d(512))
     proj4 = nn.Sequential(nn.Conv2d(256, 256, 1, 1), nn.BatchNorm2d(256))
@@ -150,7 +162,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
     })
     displacement_dropout_p = 0.0
     gm_warp_dropout_p = 0.0
-    decoder = Decoder(coordinate_decoder,
+    decoder = Decoder(torch.jit.script(coordinate_decoder),
                       gps,
                       proj,
                       conv_refiner,

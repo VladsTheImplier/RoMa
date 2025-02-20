@@ -36,11 +36,11 @@ class TransformerDecoder(nn.Module):
             # B,C,H,W = gp_posterior.shape
             x = torch.cat((gp_posterior, features), dim=1)
             B, C, H, W = x.shape
-            if self.learned_embeddings:
-                pos_enc = F.interpolate(self.learned_pos_embeddings, size=(H, W), mode='bilinear',
-                                        align_corners=False).permute(0, 2, 3, 1).reshape(1, H * W, C)
-            else:
-                pos_enc = 0
+            pos_enc = 0
+            # if self.learned_embeddings:  # TODO: always false
+            #     pos_enc = F.interpolate(self.learned_pos_embeddings, size=(H, W), mode='bilinear',
+            #                             align_corners=False).permute(0, 2, 3, 1).reshape(1, H * W, C)
+
             tokens = x.reshape(B, C, H * W).permute(0, 2, 1) + pos_enc
             z = self.blocks(tokens)
             out = self.to_out(z)
