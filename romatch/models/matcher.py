@@ -12,7 +12,7 @@ from warnings import warn
 from PIL import Image
 
 from romatch.utils import get_tuple_transform_ops
-from romatch.utils.local_correlation import local_correlation
+from romatch.utils.local_correlation import local_correlation, preprocess
 from romatch.utils.utils import check_rgb, cls_to_flow_refine, get_autocast_params, check_not_i16
 from romatch.utils.kde import kde
 
@@ -40,6 +40,7 @@ class ConvRefiner(nn.Module):
             sample_mode="bilinear",
             norm_type=nn.BatchNorm2d,
             bn_momentum=0.1,
+            timing=False,
             amp_dtype=torch.float16,
     ):
         super().__init__()
@@ -59,6 +60,7 @@ class ConvRefiner(nn.Module):
                 for hb in range(hidden_blocks)
             ]
         )
+        self.timing = timing
         self.hidden_blocks = self.hidden_blocks
         self.out_conv = nn.Conv2d(hidden_dim, out_dim, 1, 1, 0)
         if displacement_emb:
@@ -66,7 +68,7 @@ class ConvRefiner(nn.Module):
             self.disp_emb = nn.Conv2d(2, displacement_emb_dim, 1, 1, 0)
         else:
             self.has_displacement_emb = False
-        self.local_corr_radius = local_corr_radius
+        self.local_corr_radius = torch.tensor(local_corr_radius) if local_corr_radius is not None else None
         self.corr_in_other = corr_in_other
         self.no_im_B_fm = no_im_B_fm
         self.amp = amp
@@ -105,6 +107,19 @@ class ConvRefiner(nn.Module):
         relu = nn.ReLU(inplace=True)
         conv2 = nn.Conv2d(out_dim, out_dim, 1, 1, 0)
         return nn.Sequential(conv1, norm, relu, conv2)
+
+    def preprocess(self, y: torch.Tensor, flow: torch.Tensor,
+                   scale_factor: torch.Tensor, displacement_embedder: torch.nn.Module):
+        b, c, hs, ws = y.shape
+        x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode='bilinear')
+        im_A_coords = torch.meshgrid((torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=y.device),
+                                      torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=y.device),),
+                                     indexing='ij')
+        im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
+        im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
+        in_displacement = flow - im_A_coords
+        emb_in_displacement = displacement_embedder(40 / 32 * scale_factor * in_displacement)
+        return x_hat, emb_in_displacement
 
     def forward_old(self, x, y, flow, scale_factor=1, logits=None):
         b, c, hs, ws = x.shape
@@ -149,27 +164,47 @@ class ConvRefinerCoarse(ConvRefiner):
         super().__init__(*args, **kwargs)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor, flow: torch.Tensor, scale_factor):
-        b, c, hs, ws = x.shape
+        prep = torch.cuda.Event(enable_timing=True)
+        locl_cor = torch.cuda.Event(enable_timing=True)
+        blk1 = torch.cuda.Event(enable_timing=True)
+        blk_h = torch.cuda.Event(enable_timing=True)
+        blk_out = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
         with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
-            x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode=self.sample_mode)
-            im_A_coords = torch.meshgrid((torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
-                                          torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),),
-                                         indexing='ij')
-            im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
-            im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
-            in_displacement = flow - im_A_coords
+            prep.record()
+
+            x_hat, in_displacement = preprocess(y, flow)
             emb_in_displacement = self.disp_emb(40 / 32 * scale_factor * in_displacement)
+
+            locl_cor.record()
 
             # Corr in other means take a kxk grid around the predicted coordinate in other image
             local_corr = local_correlation(x, y, local_radius=self.local_corr_radius, flow=flow,
                                            sample_mode=self.sample_mode)
-
             d = torch.cat((x, x_hat, emb_in_displacement, local_corr), dim=1)
 
+            blk1.record()
+
             d = self.block1(d)
+
+            blk_h.record()
+
             d = self.hidden_blocks(d)
+
+        blk_out.record()
         d = self.out_conv(d.float())
         displacement, certainty = d[:, :-1], d[:, -1:]
+        end.record()
+
+        if self.timing:
+            torch.cuda.synchronize()
+            print(f"prep: {prep.elapsed_time(locl_cor):.4f}ms")
+            print(f"Local corr.: {locl_cor.elapsed_time(blk1):.4f}ms")
+            print(f"Block 1: {blk1.elapsed_time(blk_h):.4f}ms")
+            print(f"Block hidden: {blk_h.elapsed_time(blk_out):.4f}ms")
+            print(f"Block out: {blk_out.elapsed_time(end):.4f}ms")
+
+
         return displacement, certainty
 
 
@@ -179,15 +214,9 @@ class ConvRefinerFine(ConvRefiner):
         super().__init__(*args, **kwargs)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor, flow: torch.Tensor, scale_factor):
-        b, c, hs, ws = x.shape
         with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
-            x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode=self.sample_mode)
-            im_A_coords = torch.meshgrid((torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
-                                          torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),),
-                                         indexing='ij')
-            im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
-            im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
-            in_displacement = flow - im_A_coords
+
+            x_hat, in_displacement = preprocess(y, flow)
             emb_in_displacement = self.disp_emb(40 / 32 * scale_factor * in_displacement)
 
             d = torch.cat((x, x_hat, emb_in_displacement), dim=1)
@@ -410,9 +439,7 @@ class Decoder(nn.Module):
         device = f1[1].device
         scale_factor = torch.tensor(scale_factor, device=device)
         coarsest_scale = int(all_scales[0])
-        # old_stuff = torch.zeros(
-        #     b, self.embedding_decoder.hidden_dim, *sizes[coarsest_scale], device=f1[coarsest_scale].device
-        # )
+
         corresps = {}
         if not upsample:
             flow = self.get_placeholder_flow(b, *sizes[coarsest_scale], device)
@@ -448,18 +475,13 @@ class Decoder(nn.Module):
 
                 gp_start.record()
 
-                # old_stuff = F.interpolate(old_stuff, size=sizes[ins], mode="bilinear", align_corners=False)
                 gp_posterior = self.gps[new_scale](f1_s, f2_s)
 
                 gp_end.record()
                 dec_start.record()
 
                 gm_warp_or_cls, certainty = self.embedding_decoder(gp_posterior, f1_s)
-                # FIXME: is_classifier always true, muted this for jit
-                # if self.embedding_decoder.is_classifier:
-                #     flow = cls_to_flow_refine(gm_warp_or_cls).permute(0, 3, 1, 2)
-                # else:
-                #     flow = gm_warp_or_cls.detach()
+
                 flow = cls_to_flow_refine(gm_warp_or_cls).permute(0, 3, 1, 2)
 
                 dec_end.record()

@@ -36,9 +36,11 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
         pos_enc=False,
         timing=timing,)
 
-    coordinate_decoder = torch.jit.trace(func=coordinate_decoder.cuda(),
+    coordinate_decoder = torch.jit.trace(func=coordinate_decoder.eval().cuda(),
                            example_inputs=(torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float32),
                                            torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16)))
+    coordinate_decoder = torch.jit.script(coordinate_decoder)
+
     dw = True
     hidden_blocks = 8
     kernel_size = 5
@@ -91,6 +93,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 amp=amp,
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
+                timing=timing,
             ),
             "2": ConvRefinerFine(
                 2 * 64 + 16,
@@ -117,17 +120,18 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 amp=amp,
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
+                timing=timing,
             ),
         }
     )
-    # FIXME: not faster, tracer also claims wrong results :(
-    # cr16 = torch.jit.trace(func=conv_refiner['16'].cuda(),
-    #                        example_inputs=(torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
-    #                                        torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
-    #                                        torch.rand((1, 2, 30, 30), device='cuda', dtype=torch.float32),
-    #                                        torch.tensor(1.0, device='cuda')))
-    #
-    # conv_refiner['16'] = cr16
+
+    cr16 = torch.jit.trace(func=conv_refiner['16'].eval().cuda(),
+                           example_inputs=(torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
+                                           torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
+                                           torch.rand((1, 2, 30, 30), device='cuda', dtype=torch.float32),
+                                           torch.tensor(1.0, device='cuda', dtype=torch.float16)))
+
+    conv_refiner['16'] = torch.jit.script(cr16)
 
     kernel_temperature = 0.2
     learn_temperature = False
@@ -144,25 +148,25 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
         basis=basis,
         no_cov=no_cov,
     )
-
-    gp16 = torch.jit.trace(func=gp16.cuda(), example_inputs=(torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16),
+    gp16 = torch.jit.trace(func=gp16.eval().cuda(), example_inputs=(torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16),
                                      torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16)))
     gps = nn.ModuleDict({"16": torch.jit.script(gp16)})
+
     proj16 = nn.Sequential(nn.Conv2d(1024, 512, 1, 1), nn.BatchNorm2d(512))
     proj8 = nn.Sequential(nn.Conv2d(512, 512, 1, 1), nn.BatchNorm2d(512))
     proj4 = nn.Sequential(nn.Conv2d(256, 256, 1, 1), nn.BatchNorm2d(256))
     proj2 = nn.Sequential(nn.Conv2d(128, 64, 1, 1), nn.BatchNorm2d(64))
     proj1 = nn.Sequential(nn.Conv2d(64, 9, 1, 1), nn.BatchNorm2d(9))
     proj = nn.ModuleDict({
-        "16": proj16,
-        "8": proj8,
-        "4": proj4,
-        "2": proj2,
-        "1": proj1,
+        "16": torch.jit.script(proj16),
+        "8": torch.jit.script(proj8),
+        "4": torch.jit.script(proj4),
+        "2": torch.jit.script(proj2),
+        "1": torch.jit.script(proj1),
     })
     displacement_dropout_p = 0.0
     gm_warp_dropout_p = 0.0
-    decoder = Decoder(torch.jit.script(coordinate_decoder),
+    decoder = Decoder(coordinate_decoder,
                       gps,
                       proj,
                       conv_refiner,

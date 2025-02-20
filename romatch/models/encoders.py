@@ -67,7 +67,7 @@ class VGG19(nn.Module):
         self.amp = amp
         self.amp_dtype = amp_dtype
 
-    def forward(self, x, **kwargs):
+    def forward(self, x):
         with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
             feats = {}
             scale = 1
@@ -104,7 +104,8 @@ class CNNandDinov2(nn.Module):
             cnn = VGG19(**cnn_kwargs)
 
         self.timing = timing
-        self.cnn = cnn  #torch.jit.trace(cnn, (torch.randn((1, 3, 406, 406), device=device, dtype=torch.half)))
+        # cnn = torch.jit.trace(cnn, (torch.randn((1, 3, 420, 420), device=device, dtype=torch.half)))
+        self.cnn = cnn  # torch.jit.optimize_for_inference(torch.jit.script(cnn))
         self.amp = amp
         self.amp_dtype = amp_dtype
         if self.amp:
