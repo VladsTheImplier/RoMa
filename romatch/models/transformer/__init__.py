@@ -9,10 +9,11 @@ from .dinov2 import vit_large
 
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, blocks, hidden_dim, out_dim, is_classifier=False, *args,
+    def __init__(self, blocks, hidden_dim, out_dim, timing, is_classifier=False, *args,
                  amp=False, pos_enc=True, learned_embeddings=False, embedding_dim=None, amp_dtype=torch.float16,
                  **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.timing = timing
         self.blocks = blocks
         self.to_out = nn.Linear(hidden_dim, out_dim)
         self.hidden_dim = hidden_dim
@@ -30,7 +31,7 @@ class TransformerDecoder(nn.Module):
     def scales(self):
         return self._scales.copy()
 
-    def forward(self, gp_posterior, features, old_stuff, new_scale):
+    def forward(self, gp_posterior, features):
         with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
             # B,C,H,W = gp_posterior.shape
             x = torch.cat((gp_posterior, features), dim=1)
@@ -45,4 +46,4 @@ class TransformerDecoder(nn.Module):
             out = self.to_out(z)
             out = out.permute(0, 2, 1).reshape(B, self.out_dim, H, W)
             warp, certainty = out[:, :-1], out[:, -1:]
-            return warp, certainty, None
+            return warp, certainty

@@ -34,7 +34,8 @@ def roma_outdoor(device, weights=None, dinov2_weights=None,
                  symmetric=True, sample_mode='threshold_balanced', upsample_preds=True, attenuate_cert=True,
                  coarse_res: Union[int, tuple[int, int]] = 560,
                  upsample_res: Union[int, tuple[int, int]] = 864,
-                 amp: bool = True, amp_dtype: torch.dtype = torch.float16):
+                 amp: bool = True, amp_dtype: torch.dtype = torch.float16, timing: bool = False, **kwargs):
+
     if isinstance(coarse_res, int):
         coarse_res = (coarse_res, coarse_res)
     if isinstance(upsample_res, int):
@@ -56,7 +57,7 @@ def roma_outdoor(device, weights=None, dinov2_weights=None,
 
     model = roma_model(resolution=coarse_res, upsample_preds=upsample_preds, symmetric=symmetric,
                        sample_mode=sample_mode, weights=weights, dinov2_weights=dinov2_weights, device=device, amp=amp,
-                       amp_dtype=amp_dtype, attenuate_cert=attenuate_cert)
+                       amp_dtype=amp_dtype, attenuate_cert=attenuate_cert, timing=timing)
 
     model.upsample_res = upsample_res
     print(f"Using coarse resolution {coarse_res}, and upsample res {model.upsample_res}")

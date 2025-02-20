@@ -80,7 +80,7 @@ class VGG19(nn.Module):
 
 
 class CNNandDinov2(nn.Module):
-    def __init__(self, cnn_kwargs=None, amp=False, use_vgg=False, dinov2_weights=None, amp_dtype=torch.float16, device=None):
+    def __init__(self, timing, cnn_kwargs=None, amp=False, use_vgg=False, dinov2_weights=None, amp_dtype=torch.float16, device=None):
         super().__init__()
         if dinov2_weights is None:
             dinov2_weights = torch.hub.load_state_dict_from_url(
@@ -95,11 +95,16 @@ class CNNandDinov2(nn.Module):
 
         dinov2_vitl14 = vit_large(**vit_kwargs).eval()
         dinov2_vitl14.load_state_dict(dinov2_weights)
+        dinov2_vitl14.to(device)
+
         cnn_kwargs = cnn_kwargs if cnn_kwargs is not None else {}
         if not use_vgg:
-            self.cnn = ResNet50(**cnn_kwargs)
+            cnn = ResNet50(**cnn_kwargs)
         else:
-            self.cnn = VGG19(**cnn_kwargs)
+            cnn = VGG19(**cnn_kwargs)
+
+        self.timing = timing
+        self.cnn = cnn  #torch.jit.trace(cnn, (torch.randn((1, 3, 406, 406), device=device, dtype=torch.half)))
         self.amp = amp
         self.amp_dtype = amp_dtype
         if self.amp:
@@ -107,7 +112,7 @@ class CNNandDinov2(nn.Module):
 
         # TODO: resolve by saving entire romatch model with dino and reload
         # ugly hack to not show parameters to DDP
-        self.dinov2_vitl14 = [dinov2_vitl14.to(device)]
+        self.dinov2_vitl14 = [dinov2_vitl14] #[torch.jit.trace(dinov2_vitl14, example_inputs=(torch.randn((1, 3, 406, 406), device=device, dtype=torch.half)))]
 
     def train(self, mode: bool = True):
         return self.cnn.train(mode)
@@ -131,7 +136,8 @@ class CNNandDinov2(nn.Module):
                 feature_pyramid[16] = features_16
 
         dino.record()
-        torch.cuda.synchronize()
-        print(f"VGG: {start.elapsed_time(vgg):.4f}ms\t\tDINOv2: {vgg.elapsed_time(dino):.4f}ms")
+        if self.timing:
+            torch.cuda.synchronize()
+            print(f"{upsample=} VGG: {start.elapsed_time(vgg):.4f}ms\t\tDINOv2: {vgg.elapsed_time(dino):.4f}ms")
 
         return feature_pyramid

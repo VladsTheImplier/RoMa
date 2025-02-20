@@ -1,7 +1,7 @@
 import torch
 
 
-def kde(x, std = 0.1, half = True):
+def kde(x: torch.Tensor, std: float = 0.1, half: bool = True) -> torch.Tensor:
     # use a gaussian kernel to estimate density
     if half:
         x = x.half() # Do it in half precision TODO: remove hardcoding

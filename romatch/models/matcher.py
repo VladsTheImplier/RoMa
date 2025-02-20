@@ -110,7 +110,7 @@ class ConvRefiner(nn.Module):
         b, c, hs, ws = x.shape
         with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
             x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode=self.sample_mode)
-            if self.has_displacement_emb:
+            if self.has_displacement_emb:  # TODO True always
                 im_A_coords = torch.meshgrid((torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
                                               torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),),
                                              indexing='ij')
@@ -118,23 +118,23 @@ class ConvRefiner(nn.Module):
                 im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
                 in_displacement = flow - im_A_coords
                 emb_in_displacement = self.disp_emb(40 / 32 * scale_factor * in_displacement)
-                if self.local_corr_radius:
-                    if self.corr_in_other:
+                if self.local_corr_radius:  # TODO None in 2, 1
+                    if self.corr_in_other:  # TODO True in 16 8 4
                         # Corr in other means take a kxk grid around the predicted coordinate in other image
                         local_corr = local_correlation(x, y, local_radius=self.local_corr_radius, flow=flow,
                                                        sample_mode=self.sample_mode)
                     else:
                         raise NotImplementedError("Local corr in own frame should not be used.")
-                    if self.no_im_B_fm:
+                    if self.no_im_B_fm:  # TODO False always
                         x_hat = torch.zeros_like(x)
                     d = torch.cat((x, x_hat, emb_in_displacement, local_corr), dim=1)
                 else:
                     d = torch.cat((x, x_hat, emb_in_displacement), dim=1)
             else:
-                if self.no_im_B_fm:
+                if self.no_im_B_fm:  # TODO False always
                     x_hat = torch.zeros_like(x)
                 d = torch.cat((x, x_hat), dim=1)
-            if self.concat_logits:
+            if self.concat_logits:  # TODO False always
                 d = torch.cat((d, logits), dim=1)
             d = self.block1(d)
             d = self.hidden_blocks(d)
@@ -249,6 +249,7 @@ class GP(nn.Module):
         return coarse_embedded_coords
 
     def forward(self, x, y, **kwargs):
+    def forward(self, x: torch.Tensor, y: torch.Tensor):
         b, c, h1, w1 = x.shape
         b, c, h2, w2 = y.shape
         f = self.get_pos_enc(y)
@@ -277,10 +278,11 @@ class GP(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(
-            self, embedding_decoder, gps, proj, conv_refiner, detach=False, scales="all", pos_embeddings=None,
+            self, embedding_decoder, gps, proj, conv_refiner, timing, detach=False, scales="all", pos_embeddings=None,
             num_refinement_steps_per_scale=1, warp_noise_std=0.0, displacement_dropout_p=0.0, gm_warp_dropout_p=0.0,
             flow_upsample_mode="bilinear", amp: bool = True, amp_dtype=torch.float16):
         super().__init__()
+        self.timing = timing
         self.embedding_decoder = embedding_decoder
         self.num_refinement_steps_per_scale = num_refinement_steps_per_scale
         self.gps = gps
@@ -336,21 +338,24 @@ class Decoder(nn.Module):
     def forward(self, f1, f2, gt_warp=None, gt_prob=None, upsample=False, flow=None, certainty=None, scale_factor=1):
         gp_start = torch.cuda.Event(enable_timing=True)
         gp_end = torch.cuda.Event(enable_timing=True)
+        dec_start = torch.cuda.Event(enable_timing=True)
+        dec_end = torch.cuda.Event(enable_timing=True)
         proj_start = torch.cuda.Event(enable_timing=True)
         proj_end = torch.cuda.Event(enable_timing=True)
         refine_start = torch.cuda.Event(enable_timing=True)
         refine_end = torch.cuda.Event(enable_timing=True)
 
-        coarse_scales = self.embedding_decoder.scales()
+        coarse_scales = [16]  #self.embedding_decoder.scales() FIXME was hardcoded anyway, for jit
         all_scales = self.scales if not upsample else ["8", "4", "2", "1"]
         sizes = {scale: f1[scale].shape[-2:] for scale in f1}
         h, w = sizes[1]
         b = f1[1].shape[0]
         device = f1[1].device
+        scale_factor = torch.tensor(scale_factor, device=device)
         coarsest_scale = int(all_scales[0])
-        old_stuff = torch.zeros(
-            b, self.embedding_decoder.hidden_dim, *sizes[coarsest_scale], device=f1[coarsest_scale].device
-        )
+        # old_stuff = torch.zeros(
+        #     b, self.embedding_decoder.hidden_dim, *sizes[coarsest_scale], device=f1[coarsest_scale].device
+        # )
         corresps = {}
         if not upsample:
             flow = self.get_placeholder_flow(b, *sizes[coarsest_scale], device)
@@ -381,26 +386,33 @@ class Decoder(nn.Module):
                     f1_s, f2_s = self.proj[new_scale](f1_s), self.proj[new_scale](f2_s)
 
             proj_end.record()
-            gp_start.record()
 
             if ins in coarse_scales:
 
+                gp_start.record()
 
-                old_stuff = F.interpolate(
-                    old_stuff, size=sizes[ins], mode="bilinear", align_corners=False
-                )
+                # old_stuff = F.interpolate(old_stuff, size=sizes[ins], mode="bilinear", align_corners=False)
                 gp_posterior = self.gps[new_scale](f1_s, f2_s)
-                gm_warp_or_cls, certainty, old_stuff = self.embedding_decoder(
-                    gp_posterior, f1_s, old_stuff, new_scale
-                )
-
-                if self.embedding_decoder.is_classifier:
-                    flow = cls_to_flow_refine(gm_warp_or_cls).permute(0, 3, 1, 2)
-
-                else:
-                    flow = gm_warp_or_cls.detach()
 
             gp_end.record()
+                gp_end.record()
+                dec_start.record()
+
+                gm_warp_or_cls, certainty = self.embedding_decoder(gp_posterior, f1_s)
+                # FIXME: is_classifier always true, muted this for jit
+                # if self.embedding_decoder.is_classifier:
+                #     flow = cls_to_flow_refine(gm_warp_or_cls).permute(0, 3, 1, 2)
+                # else:
+                #     flow = gm_warp_or_cls.detach()
+                flow = cls_to_flow_refine(gm_warp_or_cls).permute(0, 3, 1, 2)
+
+                dec_end.record()
+                if self.timing:
+                    torch.cuda.synchronize()
+                    print(f"GP: {gp_start.elapsed_time(gp_end):.4f}ms")
+                    print(f"T.Decoder: {dec_start.elapsed_time(dec_end):.4f}ms")
+
+
             refine_start.record()
 
             if new_scale in self.conv_refiner:
@@ -429,11 +441,11 @@ class Decoder(nn.Module):
                     mode=self.flow_upsample_mode)
 
             refine_end.record()
-            # torch.cuda.synchronize()
-            # print(f"GP: {gp_start.elapsed_time(gp_end):.4f}ms")
-            # print(f"Proj{new_scale}: {proj_start.elapsed_time(proj_end):.4f}ms")
-            # print(f"Refine{new_scale}: {refine_start.elapsed_time(refine_end):.4f}ms")
-            # torch.cuda.empty_cache()
+            if self.timing:
+                torch.cuda.synchronize()
+                print(f"Proj{new_scale}: {proj_start.elapsed_time(proj_end):.4f}ms")
+                print(f"Refine{new_scale}: {refine_start.elapsed_time(refine_end):.4f}ms")
+            torch.cuda.empty_cache()
         return corresps
 
 
@@ -442,6 +454,7 @@ class RegressionMatcher(nn.Module):
             self,
             encoder,
             decoder,
+            timing,
             h=448,
             w=448,
             sample_mode="threshold_balanced",
@@ -451,6 +464,7 @@ class RegressionMatcher(nn.Module):
             attenuate_cert=None,
     ):
         super().__init__()
+        self.timing = timing
         self.attenuate_cert = attenuate_cert
         self.encoder = encoder
         self.decoder = decoder
@@ -676,8 +690,6 @@ class RegressionMatcher(nn.Module):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
 
-        start.record()
-
         hs, ws = self.h_resized, self.w_resized
         symmetric = self.symmetric
 
@@ -692,6 +704,8 @@ class RegressionMatcher(nn.Module):
                 corresps = self.forward_symmetric(batch, use_stored=use_stored)
             else:
                 corresps = self.forward(batch, use_stored=use_stored)
+
+            start.record()
 
             if self.upsample_preds:
                 hs, ws = self.upsample_res
@@ -710,9 +724,9 @@ class RegressionMatcher(nn.Module):
                 batch = {"im_A": im_A_upsample, "im_B": im_B_upsample, "corresps": finest_corresps}
 
                 if symmetric:
-                    corresps = self.forward_symmetric(batch, upsample=True, batched=True, scale_factor=scale_factor)
+                    corresps = self.forward_symmetric(batch, upsample=True, scale_factor=scale_factor, use_stored=use_stored)
                 else:
-                    corresps = self.forward(batch, batched=True, upsample=True, scale_factor=scale_factor)
+                    corresps = self.forward(batch, upsample=True, scale_factor=scale_factor, use_stored=use_stored)
 
             im_A_to_im_B = corresps[finest_scale]["flow"]
             certainty = corresps[finest_scale]["certainty"] - (low_res_certainty if (self.attenuate_cert and
@@ -748,6 +762,13 @@ class RegressionMatcher(nn.Module):
                 certainty = torch.cat(certainty.chunk(2), dim=3)
             else:
                 warp = torch.cat((im_A_coords, im_A_to_im_B), dim=-1)
+
+            end.record()
+            torch.cuda.empty_cache()
+            if self.timing:
+                torch.cuda.synchronize()
+                print(f"Nonsense: {start.elapsed_time(end):.4f}ms")
+
             if batched:
                 return (
                     warp,

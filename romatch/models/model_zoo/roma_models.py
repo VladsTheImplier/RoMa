@@ -17,7 +17,7 @@ def tiny_roma_v1_model(weights=None, freeze_xfeat=False, exact_softmax=False, xf
     return model
 
 
-def roma_model(resolution, upsample_preds, symmetric, sample_mode, device=None, weights=None, dinov2_weights=None,
+def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, device=None, weights=None, dinov2_weights=None,
                attenuate_cert=True, amp: bool = True, amp_dtype: torch.dtype = torch.float16, **kwargs):
     # romatch weights and dinov2 weights are loaded seperately, as dinov2 weights are not parameters
     # torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul TODO: these probably ruin stuff, should be careful
@@ -34,6 +34,8 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, device=None, 
         is_classifier=True,
         amp=amp,
         pos_enc=False, )
+        pos_enc=False,
+        timing=timing,)
     dw = True
     hidden_blocks = 8
     kernel_size = 5
@@ -153,7 +155,8 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, device=None, 
                       amp=amp,
                       scales=["16", "8", "4", "2", "1"],
                       displacement_dropout_p=displacement_dropout_p,
-                      gm_warp_dropout_p=gm_warp_dropout_p)
+                      gm_warp_dropout_p=gm_warp_dropout_p,
+                      timing=timing)
 
     encoder = CNNandDinov2(
         cnn_kwargs=dict(
@@ -164,11 +167,12 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, device=None, 
         use_vgg=True,
         dinov2_weights=dinov2_weights,
         amp_dtype=amp_dtype,
+        timing=timing,
     )
     h, w = resolution
     matcher = RegressionMatcher(encoder, decoder, h=h, w=w, upsample_preds=upsample_preds,
                                 symmetric=symmetric, attenuate_cert=attenuate_cert,
-                                sample_mode=sample_mode, **kwargs).to(device)
+                                sample_mode=sample_mode, timing=timing, **kwargs).to(device)
     matcher.load_state_dict(weights)
     matcher.show_dino()
     return matcher
