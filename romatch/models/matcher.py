@@ -248,7 +248,8 @@ class GP(nn.Module):
         coarse_embedded_coords = self.project_to_basis(coarse_coords)
         return coarse_embedded_coords
 
-    def forward(self, x, y, **kwargs):
+    # @torch.jit.trace(example_inputs=(torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16),
+    #                                  torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16)))
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         b, c, h1, w1 = x.shape
         b, c, h2, w2 = y.shape
@@ -394,7 +395,6 @@ class Decoder(nn.Module):
                 # old_stuff = F.interpolate(old_stuff, size=sizes[ins], mode="bilinear", align_corners=False)
                 gp_posterior = self.gps[new_scale](f1_s, f2_s)
 
-            gp_end.record()
                 gp_end.record()
                 dec_start.record()
 

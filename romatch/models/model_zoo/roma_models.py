@@ -33,9 +33,12 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
         cls_to_coord_res ** 2 + 1,
         is_classifier=True,
         amp=amp,
-        pos_enc=False, )
         pos_enc=False,
         timing=timing,)
+
+    coordinate_decoder = torch.jit.trace(func=coordinate_decoder.cuda(),
+                           example_inputs=(torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float32),
+                                           torch.rand((1, 512, 29, 29), device='cuda', dtype=torch.float16)))
     dw = True
     hidden_blocks = 8
     kernel_size = 5

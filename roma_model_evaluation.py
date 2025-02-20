@@ -2,7 +2,10 @@ import os
 import cv2
 import torch
 import numpy as np
+import torch.nn as nn
 import torch
+
+# torch.jit._state.disable()
 
 from constants import MEAN, STD
 from romatch import roma_outdoor
