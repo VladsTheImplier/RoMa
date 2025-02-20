@@ -12,7 +12,7 @@ from warnings import warn
 from PIL import Image
 
 from romatch.utils import get_tuple_transform_ops
-from romatch.utils.local_correlation import local_correlation, preprocess
+from romatch.utils.local_correlation import local_correlation, preprocess, local_correlation_symmetric
 from romatch.utils.utils import check_rgb, cls_to_flow_refine, get_autocast_params, check_not_i16
 from romatch.utils.kde import kde
 
@@ -41,6 +41,7 @@ class ConvRefiner(nn.Module):
             norm_type=nn.BatchNorm2d,
             bn_momentum=0.1,
             timing=False,
+            symmetric=False,
             amp_dtype=torch.float16,
     ):
         super().__init__()
@@ -60,6 +61,7 @@ class ConvRefiner(nn.Module):
                 for hb in range(hidden_blocks)
             ]
         )
+        self.symmetric = symmetric
         self.timing = timing
         self.hidden_blocks = self.hidden_blocks
         self.out_conv = nn.Conv2d(hidden_dim, out_dim, 1, 1, 0)
@@ -162,6 +164,10 @@ class ConvRefinerCoarse(ConvRefiner):
     def __init__(self, *args, **kwargs):
         """ To be used for 16, 8, 4 sizes"""
         super().__init__(*args, **kwargs)
+        if self.symmetric:
+            self.local_corr_func = local_correlation_symmetric
+        else:
+            self.local_corr_func = local_correlation
 
     def forward(self, x: torch.Tensor, y: torch.Tensor, flow: torch.Tensor, scale_factor):
         prep = torch.cuda.Event(enable_timing=True)
@@ -179,8 +185,8 @@ class ConvRefinerCoarse(ConvRefiner):
             locl_cor.record()
 
             # Corr in other means take a kxk grid around the predicted coordinate in other image
-            local_corr = local_correlation(x, y, local_radius=self.local_corr_radius, flow=flow,
-                                           sample_mode=self.sample_mode)
+            local_corr = self.local_corr_func(x, y, local_radius=self.local_corr_radius, flow=flow,
+                                              sample_mode=self.sample_mode)
             d = torch.cat((x, x_hat, emb_in_displacement, local_corr), dim=1)
 
             blk1.record()
@@ -204,18 +210,17 @@ class ConvRefinerCoarse(ConvRefiner):
             print(f"Block hidden: {blk_h.elapsed_time(blk_out):.4f}ms")
             print(f"Block out: {blk_out.elapsed_time(end):.4f}ms")
 
-
         return displacement, certainty
 
 
 class ConvRefinerFine(ConvRefiner):
     """ To be used for 2, 1 sizes"""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor, flow: torch.Tensor, scale_factor):
         with torch.autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
-
             x_hat, in_displacement = preprocess(y, flow)
             emb_in_displacement = self.disp_emb(40 / 32 * scale_factor * in_displacement)
 
@@ -431,7 +436,7 @@ class Decoder(nn.Module):
         refine_start = torch.cuda.Event(enable_timing=True)
         refine_end = torch.cuda.Event(enable_timing=True)
 
-        coarse_scales = [16]  #self.embedding_decoder.scales() FIXME was hardcoded anyway, for jit
+        coarse_scales = [16]  # self.embedding_decoder.scales() FIXME was hardcoded anyway, for jit
         all_scales = self.scales if not upsample else ["8", "4", "2", "1"]
         sizes = {scale: f1[scale].shape[-2:] for scale in f1}
         h, w = sizes[1]
@@ -489,7 +494,6 @@ class Decoder(nn.Module):
                     torch.cuda.synchronize()
                     print(f"GP: {gp_start.elapsed_time(gp_end):.4f}ms")
                     print(f"T.Decoder: {dec_start.elapsed_time(dec_end):.4f}ms")
-
 
             refine_start.record()
 
@@ -802,7 +806,8 @@ class RegressionMatcher(nn.Module):
                 batch = {"im_A": im_A_upsample, "im_B": im_B_upsample, "corresps": finest_corresps}
 
                 if symmetric:
-                    corresps = self.forward_symmetric(batch, upsample=True, scale_factor=scale_factor, use_stored=use_stored)
+                    corresps = self.forward_symmetric(batch, upsample=True, scale_factor=scale_factor,
+                                                      use_stored=use_stored)
                 else:
                     corresps = self.forward(batch, upsample=True, scale_factor=scale_factor, use_stored=use_stored)
 

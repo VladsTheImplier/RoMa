@@ -61,6 +61,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 local_corr_radius=7,
                 corr_in_other=True,
                 amp=amp,
+                symmetric=symmetric,
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
             ),
@@ -76,6 +77,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 local_corr_radius=3,
                 corr_in_other=True,
                 amp=amp,
+                symmetric=symmetric,
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
             ),
@@ -91,6 +93,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 local_corr_radius=2,
                 corr_in_other=True,
                 amp=amp,
+                symmetric=symmetric,
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
                 timing=timing,
@@ -105,6 +108,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 displacement_emb=displacement_emb,
                 displacement_emb_dim=16,
                 amp=amp,
+                symmetric=symmetric,
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
             ),
@@ -118,6 +122,7 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
                 displacement_emb=displacement_emb,
                 displacement_emb_dim=6,
                 amp=amp,
+                symmetric=symmetric,
                 disable_local_corr_grad=disable_local_corr_grad,
                 bn_momentum=0.01,
                 timing=timing,
@@ -125,13 +130,14 @@ def roma_model(resolution, upsample_preds, symmetric, sample_mode, timing, devic
         }
     )
 
-    cr16 = torch.jit.trace(func=conv_refiner['16'].eval().cuda(),
-                           example_inputs=(torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
-                                           torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
-                                           torch.rand((1, 2, 30, 30), device='cuda', dtype=torch.float32),
-                                           torch.tensor(1.0, device='cuda', dtype=torch.float16)))
+    if not symmetric:
+        cr16 = torch.jit.trace(func=conv_refiner['16'].eval().cuda(),
+                               example_inputs=(torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
+                                               torch.rand((1, 512, 30, 30), device='cuda', dtype=torch.float16),
+                                               torch.rand((1, 2, 30, 30), device='cuda', dtype=torch.float32),
+                                               torch.tensor(1.0, device='cuda', dtype=torch.float16)))
 
-    conv_refiner['16'] = torch.jit.script(cr16)
+        conv_refiner['16'] = torch.jit.script(cr16)
 
     kernel_temperature = 0.2
     learn_temperature = False

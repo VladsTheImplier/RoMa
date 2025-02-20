@@ -1,12 +1,9 @@
 import os
 import cv2
-import torch
+os.environ['PYTORCH_JIT'] = '1'
+
 import numpy as np
-import torch.nn as nn
 import torch
-
-# torch.jit._state.disable()
-
 from constants import MEAN, STD
 from romatch import roma_outdoor
 from Roma_utils import sample, prepare_image_for_roma, generate_distinct_colors, make_matching_figure, \
@@ -149,16 +146,16 @@ def main():
 
     ds_path = "/home/vladislavs/finder-data/data/thermal_data/preprocessed"
 
-    compare_dir = f"{ds_path}/tags/couples_vis_thermal_colorado_river_inverse_bigfixed"
+    compare_dir = f"{ds_path}/tags/couples_vis_thermal" #_colorado_river_inverse_bigfixed"
     # compare_dir = "/home/vladislavs/finder-data/colmap-tags-exported/DJI_20240313133809_0002_V.hf5"
 
-    img_path = f"{ds_path}/images/couples_vis_thermal_colorado_river_inverse_bigfixed"
+    img_path = f"{ds_path}/images/couples_vis_thermal" #_colorado_river_inverse_bigfixed"
 
     output_dir = f"/home/vladislavs/finder-data/roma_eval/16-02-25-fastest/"
 
     max_iter = 1e20
 
-    save_results = 0
+    save_results = 1
     compare_to_roma = 1
     compare_to_colmap = 0
 
@@ -174,7 +171,7 @@ def main():
                        "ransacReprojThreshold": 0.2,
                        "confidence": 0.99999,
                        "maxIters": 10_000,
-                       "timing": False,
+                       "timing": True,
                        }
 
     run_kwargs = {"device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
@@ -189,10 +186,10 @@ def main():
                   "ransacReprojThreshold": 1.,
                   "confidence": 0.99,
                   "maxIters": 1_000,
-                  "timing": True,
+                  "timing": False,
                   }
 
-    # run_kwargs = original_kwargs
+    run_kwargs = original_kwargs
     roma_model = roma_outdoor(**run_kwargs)
 
     times = {"im_read": [],
@@ -293,7 +290,7 @@ def main():
 
         if save_results:
             results_df = pd.DataFrame(results)
-            results_df.to_hdf(f"{output_dir}/df/results-cmp-RoMa-vis_thermal.hf5", key='df', index=False)
+            results_df.to_hdf(f"{output_dir}/df/results-cmp-RoMa-vis_thermal_no-inv.hf5", key='df', index=False)
 
     if compare_to_colmap:
         results = {"run_kwargs": [],
